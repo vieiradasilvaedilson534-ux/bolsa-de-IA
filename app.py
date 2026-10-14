@@ -292,7 +292,7 @@ def controle():
 @app.route("/api/tick")
 def tick():
     ticker = request.args.get("ticker", "PETR4.SA").upper().strip()
-    if not re.fullmatch(r"[A-Z0-9]{4,7}\\.SA", ticker):
+  if not re.fullmatch(r"[A-Z0-9]{4,7}.SA", ticker):
         return jsonify({"erro": "Código de ação inválido"}), 400
 
     conta = estado()
