@@ -14,7 +14,7 @@ B3_TICKERS = {"PETR4.SA", "VALE3.SA", "ITUB4.SA", "BBDC4.SA", "BBAS3.SA", "ABEV3
 MARKETS = {
     "PETR4.SA", "VALE3.SA", "ITUB4.SA", "BBDC4.SA", "BBAS3.SA", "ABEV3.SA", "WEGE3.SA", "MGLU3.SA",
     "^N225", "^HSI", "000001.SS", "399001.SZ", "^KS11", "^TWII", "^STI", "^AXJO", "^NSEI", "^BSESN",
-    "^GSPC", "^IXIC", "^DJI", "^RUT", "^FTSE", "^GDAXI", "^FCHI", "^STOXX50E", "^AORD", "^IBEX", "FTSEMIB.MI",
+    "^GSPC", "^IXIC", "^DJI", "^RUT", "^BVSP", "^FTSE", "^GDAXI", "^FCHI", "^STOXX50E", "^AORD", "^IBEX", "FTSEMIB.MI",
     "BRL=X", "EURBRL=X", "EURUSD=X", "JPYBRL=X", "CNYBRL=X", "GBPBRL=X", "AUDUSD=X", "USDJPY=X", "USDCNY=X",
     "GC=F", "SI=F", "CL=F", "BZ=F", "BTC-USD", "ETH-USD"
 }
@@ -25,7 +25,7 @@ HTML = r"""
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Bolsa IA — Laboratório Simulado</title>
+<title>Bolsa IA — Painel Global v2</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
 :root{color-scheme:dark;--bg:#07111f;--panel:#111e30;--line:#263850;--text:#e8effa;--muted:#9aabc2;--green:#4ade80;--red:#fb7185;--blue:#93c5fd;--gold:#fbbf24}
@@ -58,7 +58,7 @@ footer{padding:5px 2px 18px}
 </style>
 </head>
 <body><main>
-<header><div><h1>◈ Bolsa IA</h1><small>Painel global — mercados do mundo</small></div><span class="pill">● MODO SIMULADO</span></header>
+<header><div><h1>◈ Bolsa IA</h1><small>Painel global v2 — mercados do mundo</small></div><span class="pill">● MODO SIMULADO</span></header>
 <div class="notice"><b>Ambiente educativo:</b> só usa dinheiro fictício e não envia ordens reais. Indicadores e testes usam dados históricos disponíveis; resultados passados não garantem resultados futuros.</div>
 
 <section class="grid" aria-label="Resumo financeiro">
@@ -141,7 +141,7 @@ footer{padding:5px 2px 18px}
 <footer class="muted">Bolsa IA é um laboratório educativo, não uma corretora. Índices, moedas, commodities e cripto são apenas para consulta; cotações podem atrasar, usar unidades diferentes ou faltar. Nenhuma estatística ou indicador garante retorno.</footer>
 </main>
 <script>
-let chart=null,busy=false,lastPrices=[];
+let chart=null,busy=false,lastPrices=[],lastLabels=[];
 const money=n=>Number(n||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
 const quote=n=>Number(n||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:4});
 const isB3=symbol=>String(symbol).endsWith('.SA');
@@ -177,8 +177,8 @@ async function refresh(){
  try{
   const symbol=document.getElementById('ticker').value;
   const response=await fetch('/api/tick?ticker='+encodeURIComponent(symbol),{cache:'no-store'});
-  const data=await response.json();if(!response.ok)throw new Error(data.erro||'Falha ao consultar os dados.');
-  lastPrices=data.valores||[];
+  let data;try{data=await response.json();}catch(parseError){throw new Error('O servidor retornou uma resposta inválida. Atualize a página e tente novamente.');}if(!response.ok)throw new Error(data.erro||'Falha ao consultar os dados.');
+  lastPrices=data.valores||[];lastLabels=data.labels||[];
   document.getElementById('cotacaoStatus').textContent=data.dados_ok?'Cotação recebida':'Sem cotação';
   document.getElementById('preco').textContent=data.preco==null?'Indisponível':quote(data.preco);
   document.getElementById('atualizacao').textContent=data.atualizado?'Última consulta: '+data.atualizado:'Sem atualização';
@@ -191,7 +191,4 @@ async function refresh(){
   document.getElementById('carteira').innerHTML=data.carteira.length?data.carteira.map(p=>`<tr><td>${safe(p.ticker)}</td><td>${p.qtd}</td><td>${money(p.medio)}</td><td>${money(p.valor)}</td><td class="${p.lucro>=0?'green':'red'}">${money(p.lucro)}</td></tr>`).join(''):'<tr><td colspan="5">Nenhuma ação em carteira</td></tr>';
   document.getElementById('operacoes').innerHTML=data.operacoes.length?data.operacoes.map(o=>`<tr><td>${safe(o.hora)}</td><td>${safe(o.tipo)}</td><td>${safe(o.ticker)}</td><td>${o.qtd}</td><td>${money(o.preco)}</td></tr>`).join(''):'<tr><td colspan="5">Nenhuma operação registrada</td></tr>';
   drawChart(data.labels||[],lastPrices);updateIndicators(lastPrices);
- }catch(error){document.getElementById('cotacaoStatus').textContent='Falha na consulta';document.getElementById('atualizacao').textContent=error.message+' Tente novamente em alguns segundos.';}
- finally{busy=false;}
-}
-async function runBacktest(event
+ }catch(error){document.getElementById('cotacaoStatus').textContent='Falha 
