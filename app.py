@@ -3,22 +3,19 @@ import re
 from datetime import datetime
 from flask import Flask, request, redirect, url_for, session, jsonify, render_template_string
 import yfinance as yf
-
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "troque-esta-chave-no-render")
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax")
-
 INITIAL_BALANCE = 10000.0
 B3_TICKERS = {"PETR4.SA", "VALE3.SA", "ITUB4.SA", "BBDC4.SA", "BBAS3.SA", "ABEV3.SA", "WEGE3.SA", "MGLU3.SA"}
-# Símbolos disponíveis no Yahoo Finance. A disponibilidade varia por mercado.
-MARKETS = {
+US_STOCKS = {"AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "TSLA"}
+MARKETS = US_STOCKS | {
     "PETR4.SA", "VALE3.SA", "ITUB4.SA", "BBDC4.SA", "BBAS3.SA", "ABEV3.SA", "WEGE3.SA", "MGLU3.SA",
     "^N225", "^HSI", "000001.SS", "399001.SZ", "^KS11", "^TWII", "^STI", "^AXJO", "^NSEI", "^BSESN",
     "^GSPC", "^IXIC", "^DJI", "^RUT", "^BVSP", "^FTSE", "^GDAXI", "^FCHI", "^STOXX50E", "^AORD", "^IBEX", "FTSEMIB.MI",
     "BRL=X", "EURBRL=X", "EURUSD=X", "JPYBRL=X", "CNYBRL=X", "GBPBRL=X", "AUDUSD=X", "USDJPY=X", "USDCNY=X",
     "GC=F", "SI=F", "CL=F", "BZ=F", "BTC-USD", "ETH-USD"
 }
-
 HTML = r"""
 <!doctype html>
 <html lang="pt-BR">
@@ -43,7 +40,6 @@ input,select{background:#e9f0fb;color:#101827}select{flex:1 1 190px;min-width:0}
 button{background:var(--green);color:#062b17;font-weight:750;cursor:pointer;touch-action:manipulation}
 button.secondary{background:#35465f;color:#fff}button.stop{background:var(--red);color:#450a0a}button:disabled{opacity:.5;cursor:not-allowed}
 .notice{border:1px solid #6b4c1c;background:#302515;color:#fbd38d;border-radius:12px;padding:12px 14px;line-height:1.5;font-size:13px;margin:4px 0 14px}
-#chartbox{height:clamp(240px,45vw,350px);position:relative;margin-top:10px}
 .statgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
 .stat{padding:12px;border-radius:12px;background:#0c1828;border:1px solid #203149;min-width:0}.stat .value{font-size:clamp(17px,2vw,22px)}
 .two{display:grid;grid-template-columns:1fr 1fr;gap:12px}.robot-state{padding:12px;border-radius:12px;background:#1b2b40;display:flex;justify-content:space-between;align-items:center;gap:10px}
@@ -60,18 +56,17 @@ footer{padding:5px 2px 18px}
 <body><main>
 <header><div><h1>◈ Bolsa IA</h1><small>Painel global v2 — mercados do mundo</small></div><span class="pill">● MODO SIMULADO</span></header>
 <div class="notice"><b>Ambiente educativo:</b> só usa dinheiro fictício e não envia ordens reais. Indicadores e testes usam dados históricos disponíveis; resultados passados não garantem resultados futuros.</div>
-
 <section class="grid" aria-label="Resumo financeiro">
 <div class="card"><div class="label">SALDO DISPONÍVEL</div><div class="value" id="saldo">R$ 10.000,00</div></div>
 <div class="card"><div class="label">PATRIMÔNIO TOTAL</div><div class="value" id="patrimonio">R$ 10.000,00</div></div>
 <div class="card"><div class="label">LUCRO / PREJUÍZO</div><div class="value" id="lucro">R$ 0,00</div></div>
 <div class="card"><div class="label">RESULTADO REALIZADO HOJE</div><div class="value" id="dia">R$ 0,00</div></div>
 </section>
-
 <section class="card">
 <div class="sectionhead"><h2>Mercados globais e indicadores</h2><span class="pill" id="cotacaoStatus">Aguardando cotação</span></div>
 <form class="controls" id="config">
 <select id="ticker" aria-label="Escolher mercado ou ativo">
+<optgroup label="Estados Unidos — ações (robô simulado)"><option value="AAPL">AAPL — Apple</option><option value="MSFT">MSFT — Microsoft</option><option value="NVDA">NVDA — NVIDIA</option><option value="AMZN">AMZN — Amazon</option><option value="GOOGL">GOOGL — Alphabet</option><option value="TSLA">TSLA — Tesla</option></optgroup>
 <optgroup label="Brasil — B3 (negociação simulada)"><option value="PETR4.SA">PETR4 — Petrobras</option><option value="VALE3.SA">VALE3 — Vale</option><option value="ITUB4.SA">ITUB4 — Itaú</option><option value="BBDC4.SA">BBDC4 — Bradesco</option><option value="BBAS3.SA">BBAS3 — Banco do Brasil</option><option value="ABEV3.SA">ABEV3 — Ambev</option><option value="WEGE3.SA">WEGE3 — WEG</option><option value="MGLU3.SA">MGLU3 — Magazine Luiza</option></optgroup>
 <optgroup label="Ásia — índices"><option value="^N225">Japão — Nikkei 225</option><option value="^HSI">Hong Kong — Hang Seng</option><option value="000001.SS">China — Shanghai Composite</option><option value="399001.SZ">China — Shenzhen Component</option><option value="^KS11">Coreia do Sul — KOSPI</option><option value="^TWII">Taiwan — Taiwan Weighted</option><option value="^STI">Singapura — Straits Times</option><option value="^NSEI">Índia — Nifty 50</option><option value="^BSESN">Índia — Sensex</option><option value="^AXJO">Austrália — ASX 200</option></optgroup>
 <optgroup label="Américas — índices"><option value="^GSPC">EUA — S&P 500</option><option value="^IXIC">EUA — Nasdaq Composite</option><option value="^DJI">EUA — Dow Jones</option><option value="^RUT">EUA — Russell 2000</option><option value="^BVSP">Brasil — Ibovespa</option></optgroup>
@@ -96,7 +91,6 @@ footer{padding:5px 2px 18px}
 </div>
 <p class="muted" id="atualizacao" aria-live="polite">Aguardando dados…</p>
 </section>
-
 <section class="card">
 <div class="sectionhead"><h2>Teste histórico da estratégia</h2><span class="pill">Sem dinheiro real</span></div>
 <p class="muted">Simula uma estratégia de cruzamento das médias móveis de 5 e 20 períodos usando os preços históricos disponíveis. O teste inclui uma taxa simulada por operação, mas não prevê o futuro e não reproduz perfeitamente custos, impostos ou execução real.</p>
@@ -111,15 +105,14 @@ footer{padding:5px 2px 18px}
 <div class="stat"><div class="label">COMPRAR E MANTER</div><div class="value" id="btHold">—</div></div>
 <div class="stat"><div class="label">MÁXIMA QUEDA (DRAWDOWN)</div><div class="value" id="btDrawdown">—</div></div>
 <div class="stat"><div class="label">OPERAÇÕES FECHADAS</div><div class="value" id="btTrades">—</div></div>
-<div class="stat"><div class="label">OPERAÇÕES VENCEDORAS</div><div class="value" id="btWin">—</div></div>
+<div class="stat"><div class="label">TAXA DE ACERTO</div><div class="value" id="btWin">—</div></div>
 <div class="stat"><div class="label">SALDO FINAL DE TESTE</div><div class="value" id="btFinal">—</div></div>
 </div>
 <p class="hint">O teste é histórico e hipotético. Uma estratégia pode ter bom resultado no passado e perder dinheiro no futuro.</p>
 </section>
-
 <section class="card">
 <div class="sectionhead"><h2>Controles do robô</h2><span class="pill">Carteira fictícia</span></div>
-<p class="muted">O robô simulado usa o cruzamento das médias 5 e 20 apenas para ações brasileiras da B3. Os demais mercados são para consulta, gráfico e indicadores; não entram na carteira simulada para evitar misturar moedas. Compra limitada a 10% do patrimônio fictício por operação, sem alavancagem.</p>
+<p class="muted">O robô simulado opera apenas ações selecionadas dos Estados Unidos. Exige cruzamento das médias 5 e 20, RSI entre 45 e 65 e preço acima da média de 50 dias. Compra limitada a 10% do patrimônio fictício por operação, sem alavancagem. Esses filtros não garantem acerto ou lucro.</p>
 <div class="two">
 <div><div class="label">ESTADO</div><div class="robot-state"><b id="robo">Verificando…</b><span id="robotNote">—</span></div></div>
 <div><div class="label">PROTEÇÃO</div><div class="robot-state"><b>Dinheiro fictício</b><span>Ordens reais bloqueadas</span></div></div>
@@ -129,7 +122,6 @@ footer{padding:5px 2px 18px}
 </form>
 <p class="muted">Se os dados estiverem indisponíveis ou o serviço estiver suspenso, o robô não avalia sinais. Para aprendizado, mantenha-o pausado até entender os resultados.</p>
 </section>
-
 <section class="card">
 <div class="sectionhead"><h2>Carteira simulada</h2><span class="pill" id="totalPosicoes">0 posições</span></div>
 <div class="tablewrap"><table><thead><tr><th>Ação</th><th>Qtd.</th><th>Preço médio</th><th>Valor atual</th><th>Resultado</th></tr></thead><tbody id="carteira"><tr><td colspan="5">Carregando…</td></tr></tbody></table></div><p class="hint">No celular, deslize para os lados para ver todas as colunas.</p>
@@ -144,7 +136,7 @@ footer{padding:5px 2px 18px}
 let chart=null,busy=false,lastPrices=[],lastLabels=[];
 const money=n=>Number(n||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
 const quote=n=>Number(n||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:4});
-const isB3=symbol=>String(symbol).endsWith('.SA');
+const isUSStock=symbol=>['AAPL','MSFT','NVDA','AMZN','GOOGL','TSLA'].includes(String(symbol));
 const pct=n=>(n>=0?'+':'')+Number(n||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2})+'%';
 const safe=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function sma(arr,period){return arr.map((_,i)=>i+1<period?null:arr.slice(i-period+1,i+1).reduce((a,b)=>a+b,0)/period);}
@@ -186,9 +178,7 @@ async function refresh(){
   document.getElementById('lucro').textContent=money(data.lucro_total);document.getElementById('dia').textContent=money(data.lucro_dia);
   document.getElementById('lucro').className='value '+(data.lucro_total>=0?'green':'red');document.getElementById('dia').className='value '+(data.lucro_dia>=0?'green':'red');
   document.getElementById('robo').textContent=data.automatico?'ATIVO — SIMULAÇÃO':'PAUSADO';document.getElementById('robo').className=data.automatico?'green':'';
-  document.getElementById('robotNote').textContent=!isB3(symbol)?'Robô só opera B3':(data.dados_ok?'Consulta de dados concluída':'Aguardando cotação');
+  document.getElementById('robotNote').textContent=!isUSStock(symbol)?'Robô só opera ações dos EUA':(data.dados_ok?'Consulta de dados concluída':'Aguardando cotação');
   document.getElementById('totalPosicoes').textContent=data.carteira.length+' posição(ões)';
   document.getElementById('carteira').innerHTML=data.carteira.length?data.carteira.map(p=>`<tr><td>${safe(p.ticker)}</td><td>${p.qtd}</td><td>${money(p.medio)}</td><td>${money(p.valor)}</td><td class="${p.lucro>=0?'green':'red'}">${money(p.lucro)}</td></tr>`).join(''):'<tr><td colspan="5">Nenhuma ação em carteira</td></tr>';
-  document.getElementById('operacoes').innerHTML=data.operacoes.length?data.operacoes.map(o=>`<tr><td>${safe(o.hora)}</td><td>${safe(o.tipo)}</td><td>${safe(o.ticker)}</td><td>${o.qtd}</td><td>${money(o.preco)}</td></tr>`).join(''):'<tr><td colspan="5">Nenhuma operação registrada</td></tr>';
-  drawChart(data.labels||[],lastPrices);updateIndicators(lastPrices);
- }catch(error){document.getElementById('cotacaoStatus').textContent='Falhaa
+  document.getElementById('operacoes').innerHTML=data.operacoes.length?data.operacoes.map(o=>`<tr><td>${safe(o.hora)}</td><td>${safe(o.tipo)}</td><td
