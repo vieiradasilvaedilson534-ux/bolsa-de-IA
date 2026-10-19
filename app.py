@@ -181,4 +181,229 @@ async function refresh(){
   document.getElementById('robotNote').textContent=!isUSStock(symbol)?'Robô só opera ações dos EUA':(data.dados_ok?'Consulta de dados concluída':'Aguardando cotação');
   document.getElementById('totalPosicoes').textContent=data.carteira.length+' posição(ões)';
   document.getElementById('carteira').innerHTML=data.carteira.length?data.carteira.map(p=>`<tr><td>${safe(p.ticker)}</td><td>${p.qtd}</td><td>${money(p.medio)}</td><td>${money(p.valor)}</td><td class="${p.lucro>=0?'green':'red'}">${money(p.lucro)}</td></tr>`).join(''):'<tr><td colspan="5">Nenhuma ação em carteira</td></tr>';
-  document.getElementById('operacoes').innerHTML=data.operacoes.length?data.operacoes.map(o=>`<tr><td>${safe(o.hora)}</td><td>${safe(o.tipo)}</td><td
+  document.getElementById('operacoes').innerHTML=data.operacoes.length?data.operacoes.map(o=>`<tr><td>${safe(o.hora)}</td><td>${safe(o.tipo)}</td><td>${safe(o.ticker)}</td><td>${o.qtd}</td><td>${money(o.preco)}</td></tr>`).join(''):'<tr><td colspan="5">Nenhuma operação registrada</td></tr>';
+  drawChart(data.labels||[],lastPrices);updateIndicators(lastPrices);
+ }catch(error){document.getElementById('cotacaoStatus').textContent='Falhaao consultar';document.getElementById('atualizacao').textContent=error.message||'Não foi possível carregar os dados.';document.getElementById('preco').textContent='Indisponível';
+}finally{busy=false;}
+}
+document.getElementById('config').addEventListener('submit',e=>{e.preventDefault();refresh();});
+document.getElementById('ticker').addEventListener('change',refresh);
+document.getElementById('showSma').addEventListener('change',()=>drawChart(lastLabels,lastPrices));
+document.getElementById('showLma').addEventListener('change',()=>drawChart(lastLabels,lastPrices));
+document.getElementById('atualizarTudo').addEventListener('click',refresh);
+document.getElementById('telaCheia').addEventListener('click',async()=>{
+try{
+const el=document.getElementById('chartbox');
+if(!document.fullscreenElement){await el.requestFullscreen();}
+else{await document.exitFullscreen();}
+}catch(e){document.getElementById('atualizacao').textContent='Tela cheia não disponível neste navegador.';}
+});
+document.getElementById('backtestForm').addEventListener('submit',async e=>{
+e.preventDefault();
+const btn=document.getElementById('runBacktest');
+const status=document.getElementById('backtestStatus');
+btn.disabled=true;status.textContent='Executando teste histórico…';
+try{
+const symbol=document.getElementById('ticker').value;
+const periodo=document.getElementById('periodo').value;
+const taxa=document.getElementById('taxa').value;
+const r=await fetch('/api/backtest?ticker='+encodeURIComponent(symbol)+'&periodo='+encodeURIComponent(periodo)+'&taxa='+encodeURIComponent(taxa));
+const d=await r.json();
+if(!r.ok)throw new Error(d.erro||'Não foi possível executar o teste.');
+document.getElementById('btRetorno').textContent=pct(d.retorno);
+document.getElementById('btHold').textContent=pct(d.hold);
+document.getElementById('btDrawdown').textContent=pct(d.drawdown);
+document.getElementById('btTrades').textContent=d.operacoes;
+document.getElementById('btWin').textContent=d.taxa_acerto.toLocaleString('pt-BR',{maximumFractionDigits:1})+'%';
+document.getElementById('btFinal').textContent=money(d.saldo_final);
+status.textContent='Teste concluído com '+d.pontos+' preços históricos. Resultado hipotético.';
+}catch(err){status.textContent=err.message||'Erro no teste histórico.';}
+finally{btn.disabled=false;}
+});
+refresh();
+setInterval(refresh,60000);
+</script>
+</body>
+</html>
+"""
+def novo_estado():
+    return {
+        "saldo": INITIAL_BALANCE,
+        "carteira": {},
+        "operacoes": [],
+        "automatico": False,
+    }
+def estado():
+    if "estado_bolsa" not in session:
+        session["estado_bolsa"] = novo_estado()
+    return session["estado_bolsa"]
+def buscar_historico(ticker, periodo="5d", intervalo="15m"):
+    if ticker not in MARKETS:
+        raise ValueError("Ativo não permitido.")
+    dados = yf.Ticker(ticker).history(period=periodo, interval=intervalo, auto_adjust=True)
+    if dados is None or dados.empty or "Close" not in dados:
+        return [], []
+    dados = dados.dropna(subset=["Close"])
+    valores = [round(float(x), 6) for x in dados["Close"].tolist()]
+    datas = [x.strftime("%d/%m %H:%M") for x in dados.index]
+    return datas[-len(valores):], valores
+def calcular_rsi(valores, periodo=14):
+    if len(valores) <= periodo:
+        return None
+    movimentos = [valores[i] - valores[i - 1] for i in range(len(valores) - periodo, len(valores))]
+    ganhos = sum(max(x, 0) for x in movimentos) / periodo
+    perdas = sum(max(-x, 0) for x in movimentos) / periodo
+    if perdas == 0:
+        return 100.0 if ganhos > 0 else 50.0
+    rs = ganhos / perdas
+    return 100 - (100 / (1 + rs))
+def sinal_compra(valores, i=None):
+    """Filtro conservador didático: cruzamento 5/20, acima da SMA50 e RSI 45–65."""
+    if i is None:
+        i = len(valores) - 1
+    if i < 50:
+        return False
+    curta_antes = sum(valores[i - 5:i]) / 5
+    longa_antes = sum(valores[i - 20:i]) / 20
+    curta = sum(valores[i - 4:i + 1]) / 5
+    longa = sum(valores[i - 19:i + 1]) / 20
+    sma50 = sum(valores[i - 49:i + 1]) / 50
+    rsi = calcular_rsi(valores[:i + 1])
+    return curta_antes <= longa_antes and curta > longa and valores[i] > sma50 and rsi is not None and 45 <= rsi <= 65
+def simular_robo(ticker, valores, estado_atual):
+    if not estado_atual.get("automatico") or ticker not in US_STOCKS or len(valores) < 51:
+        return
+    carteira = estado_atual.setdefault("carteira", {})
+    posicao = carteira.get(ticker, {"qtd": 0, "custo": 0.0})
+    qtd = int(posicao.get("qtd", 0))
+    ultimo = float(valores[-1])
+    saldo = float(estado_atual.get("saldo", INITIAL_BALANCE))
+    agora = datetime.now().strftime("%d/%m/%Y %H:%M")
+    curta = sum(valores[-5:]) / 5
+    longa = sum(valores[-20:]) / 20
+    # Evita repetição: uma compra só no cruzamento; venda quando a média curta cai abaixo da longa.
+    if qtd == 0 and sinal_compra(valores):
+        patrimonio = saldo + sum(float(p.get("qtd", 0)) * ultimo for p in carteira.values())
+        limite = min(saldo, patrimonio * 0.10)
+        quantidade = int(limite // ultimo) if ultimo > 0 else 0
+        if quantidade > 0:
+            custo = quantidade * ultimo
+            estado_atual["saldo"] = saldo - custo
+            carteira[ticker] = {"qtd": quantidade, "custo": custo}
+            estado_atual.setdefault("operacoes", []).insert(0, {"hora": agora, "tipo": "COMPRA SIMULADA", "ticker": ticker, "qtd": quantidade, "preco": ultimo})
+    elif qtd > 0 and curta < longa:
+        recebido = qtd * ultimo
+        estado_atual["saldo"] = saldo + recebido
+        estado_atual.setdefault("operacoes", []).insert(0, {"hora": agora, "tipo": "VENDA SIMULADA", "ticker": ticker, "qtd": qtd, "preco": ultimo})
+        carteira.pop(ticker, None)
+    estado_atual["operacoes"] = estado_atual.get("operacoes", [])[:100]
+@app.route("/")
+def inicio():
+    return render_template_string(HTML)
+@app.route("/controle", methods=["POST"])
+def controle():
+    atual = estado()
+    modo = request.form.get("modo", "")
+    if modo == "ligar":
+        atual["automatico"] = True
+    elif modo == "parar":
+        atual["automatico"] = False
+    elif modo == "zerar":
+        atual = novo_estado()
+    session["estado_bolsa"] = atual
+    session.modified = True
+    return redirect(url_for("inicio"))
+@app.route("/api/tick")
+def api_tick():
+    ticker = request.args.get("ticker", "AAPL")
+    if ticker not in MARKETS:
+        return jsonify({"erro": "Ativo não permitido."}), 400
+    atual = estado()
+    try:
+        labels, valores = buscar_historico(ticker, "5d", "15m")
+        if not valores:
+            return jsonify({"erro": "Não há cotações disponíveis para este ativo agora."}), 503
+        # Robô usa cotações diárias para reduzir ruído; o gráfico continua mostrando dados intradiários.
+        if ticker in US_STOCKS:
+            _, valores_diarios = buscar_historico(ticker, "1y", "1d")
+            simular_robo(ticker, valores_diarios, atual)
+        session["estado_bolsa"] = atual
+        session.modified = True
+        preco = valores[-1]
+        carteira_resumo = []
+        total_acoes = 0.0
+        for simbolo, posicao in atual.get("carteira", {}).items():
+            try:
+                _, cotacoes = buscar_historico(simbolo, "5d", "1d")
+                preco_atual = cotacoes[-1] if cotacoes else float(posicao.get("custo", 0)) / max(1, int(posicao.get("qtd", 1)))
+            except Exception:
+                preco_atual = float(posicao.get("custo", 0)) / max(1, int(posicao.get("qtd", 1)))
+            quantidade = int(posicao.get("qtd", 0))
+            custo = float(posicao.get("custo", 0))
+            valor = quantidade * preco_atual
+            total_acoes += valor
+            carteira_resumo.append({"ticker": simbolo, "qtd": quantidade, "medio": custo / quantidade if quantidade else 0, "valor": valor, "lucro": valor - custo})
+        saldo = float(atual.get("saldo", INITIAL_BALANCE))
+        patrimonio = saldo + total_acoes
+        return jsonify({"dados_ok": True, "labels": labels[-100:], "valores": valores[-100:], "preco": preco, "atualizado": datetime.now().strftime("%d/%m/%Y %H:%M:%S"), "saldo": saldo, "patrimonio": patrimonio, "lucro_total": patrimonio - INITIAL_BALANCE, "lucro_dia": 0.0, "automatico": bool(atual.get("automatico")), "carteira": carteira_resumo, "operacoes": atual.get("operacoes", [])[:30]})
+    except Exception:
+        app.logger.exception("Falha ao consultar cotações")
+        return jsonify({"erro": "Falha ao consultar dados do mercado. Tente novamente mais tarde."}), 503
+@app.route("/api/backtest")
+def api_backtest():
+    ticker = request.args.get("ticker", "AAPL")
+    periodo = request.args.get("periodo", "1y")
+    taxa_texto = request.args.get("taxa", "0.001")
+    if ticker not in MARKETS:
+        return jsonify({"erro": "Ativo não permitido."}), 400
+    if periodo not in {"6mo", "1y", "2y", "5y"}:
+        return jsonify({"erro": "Período inválido."}), 400
+    try:
+        taxa = float(taxa_texto)
+        if not 0 <= taxa <= 0.02:
+            raise ValueError()
+    except (TypeError, ValueError):
+        return jsonify({"erro": "Taxa inválida."}), 400
+    try:
+        _, valores = buscar_historico(ticker, periodo, "1d")
+        if len(valores) < 60:
+            return jsonify({"erro": "Dados históricos insuficientes; tente outro período ou ação."}), 503
+        saldo = INITIAL_BALANCE
+        quantidade = 0.0
+        preco_compra = 0.0
+        custo_compra = 0.0
+        patrimonio_maximo = INITIAL_BALANCE
+        drawdown_maximo = 0.0
+        operacoes = 0
+        vencedoras = 0
+        for i in range(50, len(valores)):
+            preco = valores[i]
+            if quantidade == 0 and ticker in US_STOCKS and sinal_compra(valores[:i + 1]):
+                quantidade = saldo / (preco * (1 + taxa))
+                preco_compra = preco
+                custo_compra = quantidade * preco * (1 + taxa)
+                saldo -= custo_compra
+            elif quantidade > 0:
+                curta = sum(valores[i - 4:i + 1]) / 5
+                longa = sum(valores[i - 19:i + 1]) / 20
+                if curta < longa:
+                    resultado = quantidade * preco * (1 - taxa) - custo_compra
+                    if resultado > 0:
+                        vencedoras += 1
+                    saldo += quantidade * preco * (1 - taxa)
+                    quantidade = 0.0
+                    operacoes += 1
+            patrimonio = saldo + quantidade * preco
+            patrimonio_maximo = max(patrimonio_maximo, patrimonio)
+            if patrimonio_maximo > 0:
+                drawdown_maximo = max(drawdown_maximo, (patrimonio_maximo - patrimonio) / patrimonio_maximo)
+        saldo_final = saldo + quantidade * valores[-1]
+        retorno = (saldo_final / INITIAL_BALANCE - 1) * 100
+        hold = (valores[-1] / valores[0] - 1) * 100
+        taxa_acerto = (vencedoras / operacoes * 100) if operacoes else 0.0
+        return jsonify({"retorno": retorno, "hold": hold, "drawdown": drawdown_maximo * 100, "operacoes": operacoes, "vencedoras": vencedoras, "taxa_acerto": taxa_acerto, "saldo_final": saldo_final, "pontos": len(valores)})
+    except Exception:
+        app.logger.exception("Falha no backtest")
+        return jsonify({"erro": "Não foi possível executar o teste histórico agora."}), 503
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "10000")))
