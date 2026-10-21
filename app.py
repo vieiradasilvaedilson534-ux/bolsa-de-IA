@@ -7,8 +7,10 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "troque-esta-chave-no-render")
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax")
 INITIAL_BALANCE = 10000.0
+ALLOCATION_PER_ASSET_BRL = 5.0
 B3_TICKERS = {"PETR4.SA", "VALE3.SA", "ITUB4.SA", "BBDC4.SA", "BBAS3.SA", "ABEV3.SA", "WEGE3.SA", "MGLU3.SA"}
 US_STOCKS = {"AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "TSLA"}
+TRADEABLE_STOCKS = US_STOCKS | B3_TICKERS
 MARKETS = US_STOCKS | {
     "PETR4.SA", "VALE3.SA", "ITUB4.SA", "BBDC4.SA", "BBAS3.SA", "ABEV3.SA", "WEGE3.SA", "MGLU3.SA",
     "^N225", "^HSI", "000001.SS", "399001.SZ", "^KS11", "^TWII", "^STI", "^AXJO", "^NSEI", "^BSESN",
@@ -112,13 +114,15 @@ footer{padding:5px 2px 18px}
 </section>
 <section class="card">
 <div class="sectionhead"><h2>Controles do robô</h2><span class="pill">Carteira fictícia</span></div>
-<p class="muted">O robô simulado opera apenas ações selecionadas dos Estados Unidos. Exige cruzamento das médias 5 e 20, RSI entre 45 e 65 e preço acima da média de 50 dias. Compra limitada a 10% do patrimônio fictício por operação, sem alavancagem. Esses filtros não garantem acerto ou lucro.</p>
+<p class="muted">Modo multiactivo: o robô verifica <b>todas as 14 ações listadas neste aplicativo</b>, sem depender da ação selecionada no gráfico. Quando houver sinal de compra, tenta alocar até R$ 5 fictícios naquele ativo. Ações americanas são convertidas para reais pela cotação USD/BRL. Índices, moedas, commodities e cripto ficam disponíveis para consulta, mas não são ações e não entram neste robô.</p>
+<div class="statgrid" style="margin:12px 0"><div class="stat"><div class="label">AÇÕES DOS EUA</div><div class="value">6</div><small>AAPL, MSFT, NVDA, AMZN, GOOGL, TSLA</small></div><div class="stat"><div class="label">AÇÕES DA B3</div><div class="value">8</div><small>PETR4, VALE3, ITUB4, BBDC4, BBAS3, ABEV3, WEGE3, MGLU3</small></div></div>
+<div class="notice"><b>Limite do modo multiactivo:</b> ele analisa ações cadastradas (EUA + B3), não literalmente todos os instrumentos do mundo. A carteira é simulada; não há envio de ordens reais.</div>
 <div class="two">
 <div><div class="label">ESTADO</div><div class="robot-state"><b id="robo">Verificando…</b><span id="robotNote">—</span></div></div>
 <div><div class="label">PROTEÇÃO</div><div class="robot-state"><b>Dinheiro fictício</b><span>Ordens reais bloqueadas</span></div></div>
 </div>
 <form class="controls" method="post" action="/controle" style="margin-top:14px">
-<button name="modo" value="ligar" type="submit">Ativar robô</button><button class="stop" name="modo" value="parar" type="submit">Pausar robô</button><button class="secondary" name="modo" value="zerar" type="submit" onclick="return confirm('Reiniciar saldo fictício e apagar o histórico desta sessão?')">Reiniciar simulação</button>
+<button name="modo" value="ligar" type="submit">Ativar robô — 14 ações (até R$ 5 cada)</button><button class="stop" name="modo" value="parar" type="submit">Pausar robô</button><button class="secondary" name="modo" value="zerar" type="submit" onclick="return confirm('Reiniciar saldo fictício e apagar o histórico desta sessão?')">Reiniciar simulação</button>
 </form>
 <p class="muted">Se os dados estiverem indisponíveis ou o serviço estiver suspenso, o robô não avalia sinais. Para aprendizado, mantenha-o pausado até entender os resultados.</p>
 </section>
@@ -178,7 +182,7 @@ async function refresh(){
   document.getElementById('lucro').textContent=money(data.lucro_total);document.getElementById('dia').textContent=money(data.lucro_dia);
   document.getElementById('lucro').className='value '+(data.lucro_total>=0?'green':'red');document.getElementById('dia').className='value '+(data.lucro_dia>=0?'green':'red');
   document.getElementById('robo').textContent=data.automatico?'ATIVO — SIMULAÇÃO':'PAUSADO';document.getElementById('robo').className=data.automatico?'green':'';
-  document.getElementById('robotNote').textContent=!isUSStock(symbol)?'Ativo para consulta; robô automático limitado':(data.dados_ok?'Consulta de dados concluída':'Aguardando cotação');
+  document.getElementById('robotNote').textContent=data.automatico?'Analisa ações cadastradas dos EUA + B3; R$ 5 por entrada simulada':(data.dados_ok?'Robô pausado; gráfico atualizado':'Aguardando cotação');
   document.getElementById('totalPosicoes').textContent=data.carteira.length+' posição(ões)';
   document.getElementById('carteira').innerHTML=data.carteira.length?data.carteira.map(p=>`<tr><td>${safe(p.ticker)}</td><td>${p.qtd}</td><td>${money(p.medio)}</td><td>${money(p.valor)}</td><td class="${p.lucro>=0?'green':'red'}">${money(p.lucro)}</td></tr>`).join(''):'<tr><td colspan="5">Nenhuma ação em carteira</td></tr>';
   document.getElementById('operacoes').innerHTML=data.operacoes.length?data.operacoes.map(o=>`<tr><td>${safe(o.hora)}</td><td>${safe(o.tipo)}</td><td>${safe(o.ticker)}</td><td>${o.qtd}</td><td>${money(o.preco)}</td></tr>`).join(''):'<tr><td colspan="5">Nenhuma operação registrada</td></tr>';
@@ -233,6 +237,8 @@ def novo_estado():
         "carteira": {},
         "operacoes": [],
         "automatico": False,
+        "multiactivo": True,
+        "processados": {},
     }
 def estado():
     if "estado_bolsa" not in session:
@@ -277,33 +283,59 @@ def sinal_compra(valores, i=None):
     sma50 = sum(valores[i - 49:i + 1]) / 50
     rsi = calcular_rsi(valores[:i + 1])
     return curta_antes <= longa_antes and curta > longa and valores[i] > sma50 and rsi is not None and 45 <= rsi <= 65
-def simular_robo(ticker, valores, estado_atual):
-    if not estado_atual.get("automatico") or ticker not in US_STOCKS or len(valores) < 51:
+def simular_robo(ticker, valores, estado_atual, preco_brl=None):
+    """Executa somente operações fictícias, limitadas a R$ 5 por ativo."""
+    if not estado_atual.get("automatico") or ticker not in TRADEABLE_STOCKS or len(valores) < 51:
         return
     carteira = estado_atual.setdefault("carteira", {})
-    posicao = carteira.get(ticker, {"qtd": 0, "custo": 0.0})
-    qtd = int(posicao.get("qtd", 0))
-    ultimo = float(valores[-1])
+    operacoes = estado_atual.setdefault("operacoes", [])
+    posicao = carteira.get(ticker, {"qtd": 0.0, "custo": 0.0})
+    qtd = float(posicao.get("qtd", 0))
+    preco_local = float(valores[-1])
+    # Ações dos EUA cotam em USD; convertemos para BRL para respeitar o limite de R$ 5.
+    if ticker in US_STOCKS:
+        if preco_brl is None or preco_brl <= 0:
+            return
+        preco = preco_local * float(preco_brl)
+    else:
+        preco = preco_local
     saldo = float(estado_atual.get("saldo", INITIAL_BALANCE))
     agora = datetime.now().strftime("%d/%m/%Y %H:%M")
     curta = sum(valores[-5:]) / 5
     longa = sum(valores[-20:]) / 20
-    # Evita repetição: uma compra só no cruzamento; venda quando a média curta cai abaixo da longa.
-    if qtd == 0 and sinal_compra(valores):
-        patrimonio = saldo + sum(float(p.get("qtd", 0)) * ultimo for p in carteira.values())
-        limite = min(saldo, patrimonio * 0.10)
-        quantidade = int(limite // ultimo) if ultimo > 0 else 0
-        if quantidade > 0:
-            custo = quantidade * ultimo
+    if qtd <= 0 and sinal_compra(valores):
+        investimento = min(ALLOCATION_PER_ASSET_BRL, saldo)
+        quantidade = investimento / preco if preco > 0 else 0.0
+        if quantidade > 0 and investimento >= 0.01:
+            custo = quantidade * preco
             estado_atual["saldo"] = saldo - custo
-            carteira[ticker] = {"qtd": quantidade, "custo": custo}
-            estado_atual.setdefault("operacoes", []).insert(0, {"hora": agora, "tipo": "COMPRA SIMULADA", "ticker": ticker, "qtd": quantidade, "preco": ultimo})
+            carteira[ticker] = {"qtd": quantidade, "custo": custo, "moeda": "BRL"}
+            operacoes.insert(0, {"hora": agora, "tipo": "COMPRA SIMULADA R$ 5", "ticker": ticker, "qtd": round(quantidade, 8), "preco": preco})
     elif qtd > 0 and curta < longa:
-        recebido = qtd * ultimo
+        custo = float(posicao.get("custo", 0))
+        recebido = qtd * preco
         estado_atual["saldo"] = saldo + recebido
-        estado_atual.setdefault("operacoes", []).insert(0, {"hora": agora, "tipo": "VENDA SIMULADA", "ticker": ticker, "qtd": qtd, "preco": ultimo})
+        operacoes.insert(0, {"hora": agora, "tipo": "VENDA SIMULADA", "ticker": ticker, "qtd": round(qtd, 8), "preco": preco})
         carteira.pop(ticker, None)
-    estado_atual["operacoes"] = estado_atual.get("operacoes", [])[:100]
+    estado_atual["operacoes"] = operacoes[:100]
+
+def processar_todos_ativos(estado_atual):
+    """Avalia cada ação elegível quando o painel é atualizado; nunca envia ordens reais."""
+    if not estado_atual.get("automatico"):
+        return
+    try:
+        fx_labels, fx_values = buscar_historico("BRL=X", "5d", "1d")
+        usdbrl = fx_values[-1] if fx_values else None
+    except Exception:
+        usdbrl = None
+    for simbolo in sorted(TRADEABLE_STOCKS):
+        try:
+            _, diarios = buscar_historico(simbolo, "1y", "1d")
+            conversao = usdbrl if simbolo in US_STOCKS else None
+            simular_robo(simbolo, diarios, estado_atual, conversao)
+        except Exception:
+            app.logger.warning("Sem dados para avaliar %s", simbolo)
+
 @app.route("/")
 def inicio():
     return render_template_string(HTML)
@@ -330,10 +362,8 @@ def api_tick():
         labels, valores = buscar_historico(ticker, "5d", "15m")
         if not valores:
             return jsonify({"erro": "Não há cotações disponíveis para este ativo agora."}), 503
-        # Robô usa cotações diárias para reduzir ruído; o gráfico continua mostrando dados intradiários.
-        if ticker in US_STOCKS:
-            _, valores_diarios = buscar_historico(ticker, "1y", "1d")
-            simular_robo(ticker, valores_diarios, atual)
+        # O robô avalia todas as ações cadastradas, não apenas o símbolo do gráfico.
+        processar_todos_ativos(atual)
         session["estado_bolsa"] = atual
         session.modified = True
         preco = valores[-1]
@@ -342,17 +372,21 @@ def api_tick():
         for simbolo, posicao in atual.get("carteira", {}).items():
             try:
                 _, cotacoes = buscar_historico(simbolo, "5d", "1d")
-                preco_atual = cotacoes[-1] if cotacoes else float(posicao.get("custo", 0)) / max(1, int(posicao.get("qtd", 1)))
+                preco_atual = cotacoes[-1] if cotacoes else float(posicao.get("custo", 0)) / max(1, float(posicao.get("qtd", 1)))
+                if simbolo in US_STOCKS:
+                    _, fx = buscar_historico("BRL=X", "5d", "1d")
+                    if fx:
+                        preco_atual *= fx[-1]
             except Exception:
-                preco_atual = float(posicao.get("custo", 0)) / max(1, int(posicao.get("qtd", 1)))
-            quantidade = int(posicao.get("qtd", 0))
+                preco_atual = float(posicao.get("custo", 0)) / max(1e-8, float(posicao.get("qtd", 1)))
+            quantidade = float(posicao.get("qtd", 0))
             custo = float(posicao.get("custo", 0))
             valor = quantidade * preco_atual
             total_acoes += valor
             carteira_resumo.append({"ticker": simbolo, "qtd": quantidade, "medio": custo / quantidade if quantidade else 0, "valor": valor, "lucro": valor - custo})
         saldo = float(atual.get("saldo", INITIAL_BALANCE))
         patrimonio = saldo + total_acoes
-        return jsonify({"dados_ok": True, "labels": labels[-100:], "valores": valores[-100:], "preco": preco, "atualizado": datetime.now().strftime("%d/%m/%Y %H:%M:%S"), "saldo": saldo, "patrimonio": patrimonio, "lucro_total": patrimonio - INITIAL_BALANCE, "lucro_dia": 0.0, "automatico": bool(atual.get("automatico")), "carteira": carteira_resumo, "operacoes": atual.get("operacoes", [])[:30]})
+        return jsonify({"dados_ok": True, "labels": labels[-100:], "valores": valores[-100:], "preco": preco, "atualizado": datetime.now().strftime("%d/%m/%Y %H:%M:%S"), "saldo": saldo, "patrimonio": patrimonio, "lucro_total": patrimonio - INITIAL_BALANCE, "lucro_dia": 0.0, "automatico": bool(atual.get("automatico")), "multiactivo": True, "universo_robo": sorted(TRADEABLE_STOCKS), "total_acoes_monitoradas": len(TRADEABLE_STOCKS), "carteira": carteira_resumo, "operacoes": atual.get("operacoes", [])[:30]})
     except Exception:
         app.logger.exception("Falha ao consultar cotações")
         return jsonify({"erro": "Falha ao consultar dados do mercado. Tente novamente mais tarde."}), 503
